@@ -1,0 +1,405 @@
+---
+title: "Coccidiosis SEIS Model - Simulation and Visualization"
+author: "Marie Ithurbide"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    theme: united
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Overview
+
+This R Markdown document demonstrates how to run the coccidiosis SEIS (Susceptible-Exposed-Infected-Susceptible) epidemiological model and visualize the results. The model simulates disease transmission dynamics, environmental oocyst contamination, immune response, and growth impacts in poultry populations infected with Eimeria species.
+
+## Model Features
+
+- **Hybrid stochastic-deterministic framework**: Gillespie algorithm for disease transitions + continuous processes for growth
+- **Individual-based model**: Tracks infection history and phenotype for each animal
+- **Multiple reinfections**: Animals can be reinfected with acquired immunity effects
+- **Growth impacts**: Models both tolerance (growth during infection) and resilience (compensatory growth)
+- **Environmental transmission**: Oocyst shedding, environmental decay, and density-dependent transmission
+
+# Package Loading
+
+```{r load-packages, message=FALSE, warning=FALSE}
+# Data manipulation and visualization
+library(ggplot2)        # Graphics and plotting
+library(data.table)     # Fast data manipulation
+library(dplyr)          # Data wrangling
+
+# Statistical analysis and table formatting
+library(rockchalk)      # Statistical utilities
+library(gt)             # Table formatting
+library(ggpubr)         # Publication-ready plot arrangements
+library("viridis")      # Color palettes
+
+# Display numbers without scientific notation
+options(scipen = 999)
+```
+
+# Model Setup and Execution
+
+## Load Model Code
+
+```{r load-model}
+# Load the main simulation function
+source('Function Modele coccidiose_simple V1.R')
+
+# Load epidemiological parameters (defined globally)
+source('Model.parameters - simple-V1.R')
+```
+
+## Configure Simulation Parameters
+
+```{r simulation-config}
+## Basic Simulation Parameters
+## ---------------------------------------------------------------------------
+reps <- 10L          # Number of stochastic replicates
+Ntot <- 20           # Population size (number of animals)
+Tmax <- 84           # Final age at slaughter (days)
+Age_exp <- 10        # Age at experimental infection (days)
+Area <- 20           # Floor area in m² (affects transmission density)
+dT <- 0.5            # Time step for deterministic processes (days)
+
+## Individual Heterogeneity Settings
+## ---------------------------------------------------------------------------
+# Note: Parameters from Model.parameters file can be overridden here
+# Set Sig = 0 for homogeneous population, Sig > 0 for heterogeneous
+
+# Susceptibility variation (log-scale)
+mu_g <- 0
+Sig_g <- 0
+
+# Excretion potential variation (log-scale)
+mu_f <- 0
+Sig_f <- 0
+
+# Immune response speed variation (log-scale)
+mu_imm <- 0
+Sig_imm <- 0
+
+# Growth potential variation (grams at 80 days)
+mu_K <- 1800
+Sig_K <- 0
+
+# Disease tolerance variation (log-scale)
+mu_t <- 0
+Sig_t <- 0
+
+# Disease resilience variation (log-scale, compensatory growth)
+mu_r <- 5
+Sig_r <- 0
+```
+
+## Run Simulation
+
+```{r run-simulation}
+# Execute the simulation
+# This may take several seconds to minutes depending on parameters
+simu_outcome <- cocci_simu()
+
+# Extract output datasets for analysis
+SIMULATION <- simu_outcome$SIMULATION            # Replicate-level summaries
+SIMULATION_param <- simu_outcome$SIMULATION_param  # Parameter record
+dfplot2_env <- simu_outcome$dfplot2_env          # Environmental time series
+PERFs <- simu_outcome$PERFs                      # Individual performance data
+ANI_SUMMARY <- simu_outcome$ANI_SUMMARY          # Individual infection histories
+dfplot2 <- simu_outcome$dfplot2                  # Status counts time series
+```
+
+# Results Visualization
+
+## Multi-Panel Overview of All Replicates
+
+```{r facet-plots, message=FALSE, warning=FALSE}
+# Set x-axis limit for plots (days post-infection)
+xlimit <- 74
+
+# Plot 1: Environmental contamination (infectious oocysts) by replicate
+ggplot(data = dfplot2_env,
+       aes(x = time, y = nInfectFeces, group = paste(rep))) +
+    geom_point(size = 0.5, color = c("brown4")) +
+    ylab("Oocyst load") +
+    xlab("Time (days post-infection)") +
+    ggtitle("Environmental Infectious Load by Replicate") +
+    xlim(c(0, xlimit)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    facet_wrap( ~ rep)
+
+# Plot 2: Mean weight deviation (±SD) by replicate
+ggplot(data = dfplot2_env,
+      aes(x = time, y = mean_wd, group = paste(rep))) +
+   geom_ribbon(aes(ymin = mean_wd - sd_wd,
+                   ymax = mean_wd + sd_wd),
+               alpha = 0.2) +
+   geom_point(size = 0.5) +
+   ylab("Weight deviation (%)") +
+   xlab("Time (days post-infection)") +
+   ggtitle("Mean Weight Deviation by Replicate") +
+   xlim(c(0, xlimit)) +
+   theme_bw() +
+   theme(legend.position = "none") +
+   facet_wrap( ~ rep)
+
+# Plot 3: Individual weight trajectories
+ggplot(data = PERFs,
+       aes(x = time, y = weight, group = ID, col = as.factor(ID))) +
+    geom_line() +
+    ylab("Body weight (g)") +
+    xlab("Time (days post-infection)") +
+    ggtitle("Individual Weight Trajectories") +
+    xlim(c(0, xlimit)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    facet_wrap( ~ rep)
+
+# Plot 4: Individual weight deviation trajectories
+ggplot(data = PERFs,
+       aes(x = time, y = weight_deviation, group = ID, col = as.factor(ID))) +
+    geom_line() +
+    xlab("Time (days post-infection)") +
+    ylab("Weight deviation (%)") +
+    ggtitle("Individual Weight Loss Trajectories") +
+    xlim(c(0, xlimit)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    facet_wrap( ~ rep)
+```
+
+## Disease Status Dynamics (Main Plot 1)
+
+```{r status-plot, fig.width=10, fig.height=6}
+# Prepare mean data across replicates
+A <- dfplot2
+A$Day<-round(A$time,0)
+A<-aggregate(A$var,by=list(A$Status,A$Day),FUN=mean)
+colnames(A)<-c("Status","time","var")
+A$TYPE<-"MEAN"
+A$rep<-0
+
+dfplot2$TYPE<-"INDIVIDUAL"
+A<-rbind(A,dfplot2)
+A$Status <- factor(A$Status, levels = c("S", "E", "I", "D"))
+
+p1<-ggplot(data = A,
+       aes(x = time, y = var, group = paste(rep, Status), col = Status, alpha=TYPE)) +
+    geom_line(aes(size = TYPE)) +
+    xlab("Days of epidemic") +
+    ylab("Chicken (n)") +
+    ggtitle("") +
+    xlim(c(0, xlimit)) +
+    scale_color_manual(values = c("S" = "dodgerblue", 
+                                 "E" = "orange2", 
+                                 "I" = "red2", 
+                                 "D" = "black")) +
+    scale_size_manual(values = c("INDIVIDUAL" = 0.5, "MEAN" = 1.2)) +
+    theme_bw() +
+    theme(legend.position = c(0.95, 0.95),
+          legend.justification = c(1, 1),
+          legend.background = element_rect(fill = "white", color = "black", size = 0.3),
+          legend.margin = margin(6, 6, 6, 6),
+          legend.direction = "vertical") +
+    guides(color = guide_legend(order = 1),
+           size = "none",
+           alpha = "none")
+p1
+```
+
+# Infectious load
+
+```{r}
+
+# First, create the mean values similar to your first example
+env_mean <- dfplot2_env
+env_mean$Day <- round(env_mean$time, 0)
+env_mean <- aggregate(env_mean$nInfectFeces, by=list(env_mean$Day), FUN=mean)
+colnames(env_mean) <- c("time", "nInfectFeces")
+env_mean$TYPE <- "MEAN"
+env_mean$rep <- 0
+
+# Add TYPE to original data
+dfplot2_env$TYPE <- "INDIVIDUAL"
+
+# Combine datasets
+env_combined <- rbind(env_mean, dfplot2_env[,c("time","nInfectFeces","TYPE","rep")])
+
+# Create the modified plot
+p2<-ggplot(data = env_combined,
+       aes(x = time, y = nInfectFeces, group = paste(rep), alpha = TYPE)) +
+    geom_line(aes(size = TYPE), color = "brown4") +
+    xlab("Days of epidemic") +
+    ylab("Infectious load") +
+    ggtitle("") +
+    xlim(c(0, xlimit)) +
+    scale_size_manual(values = c("INDIVIDUAL" = 0.5, "MEAN" = 1.2)) +
+    theme_bw() +
+    theme(legend.position = "bottom", 
+          legend.direction = "horizontal") +
+    guides(size = "none",
+           alpha = "none")
+
+p2
+```
+
+Weight curves
+```{r}
+# Create mean values
+weight_mean <- PERFs
+weight_mean$Day <- round(weight_mean$time, 0)
+weight_mean <- aggregate(weight_mean$weight, by=list(weight_mean$Day,weight_mean$rep), FUN=mean,na.rm=TRUE)
+colnames(weight_mean) <- c("time","rep", "weight")
+weight_mean$TYPE <- "INDIVIDUAL"
+
+weight_mean2 <- aggregate(weight_mean$weight, by=list(weight_mean$time), FUN=mean,na.rm=TRUE)
+colnames(weight_mean2) <- c("time", "weight")
+weight_mean2$TYPE <- "MEAN"
+weight_mean2$rep<-0
+
+# Combine datasets
+weight_combined <- rbind(weight_mean, weight_mean2)
+weight_combined$time<-10+weight_combined$time
+
+p3<-ggplot(data = weight_combined,
+       aes(x = time, y = weight)) +
+    geom_line(data = subset(weight_combined, TYPE == "INDIVIDUAL"), 
+              aes(group = rep), color = "darkgreen", size = 0.7, alpha = 0.5) +
+    geom_line(data = subset(weight_combined, TYPE == "MEAN"),
+              color = "red3", size = 1) +
+    geom_abline(intercept = 140, slope = 22.5, color = "black", linetype = "solid", size = 1) +
+    xlab("Age (days)") +
+    ylab("Weight (g)") +
+    ggtitle("") +
+    xlim(c(0, xlimit)) +
+    theme_bw() +
+    theme(legend.position = "bottom", 
+          legend.direction = "horizontal") +
+    scale_x_continuous(expand = c(0, 0), limits = c(10, xlimit)) +
+    scale_y_continuous(expand = c(0, 0), limits = c(0, max(weight_combined$weight)))
+
+p3
+
+```
+Weight deviation curves
+```{r}
+# Create mean values
+weight_mean <- PERFs
+weight_mean$Day <- round(weight_mean$time, 0)
+weight_mean <- aggregate(weight_mean$weight_deviation, by=list(weight_mean$Day,weight_mean$rep), FUN=mean,na.rm=TRUE)
+colnames(weight_mean) <- c("time","rep", "weight_deviation")
+weight_mean$TYPE <- "INDIVIDUAL"
+
+weight_mean2 <- aggregate(weight_mean$weight_deviation, by=list(weight_mean$time), FUN=mean,na.rm=TRUE)
+colnames(weight_mean2) <- c("time", "weight_deviation")
+weight_mean2$TYPE <- "MEAN"
+weight_mean2$rep<-0
+
+# Combine datasets
+weight_combined <- rbind(weight_mean, weight_mean2)
+weight_combined$time<-10+weight_combined$time
+
+p4<-ggplot(data = weight_combined,
+       aes(x = time, y = weight_deviation)) +
+    geom_line(data = subset(weight_combined, TYPE == "INDIVIDUAL"), 
+              aes(group = rep), color = "darkgreen", size = 0.7, alpha = 0.5) +
+    geom_line(data = subset(weight_combined, TYPE == "MEAN"),
+              color = "red3", size = 1) +
+    geom_abline(intercept = 0, slope = 0, color = "black", linetype = "solid", size = 1) +
+    xlab("Age (days)") +
+    ylab("Weight deviation (%)") +
+    ggtitle("") +
+    xlim(c(0, xlimit)) +
+    theme_bw() +
+    theme(legend.position = "bottom", 
+          legend.direction = "horizontal") +
+    scale_x_continuous(expand = c(0, 0), limits = c(10, xlimit)) +
+    scale_y_continuous(expand = c(0, 0), limits = c(0, max(weight_combined$weight_deviation)))
+
+p4
+```
+
+Weight deviation x infectious load
+```{r}
+
+weight_combined<-aggregate(weight_combined$weight_deviation,by=list(round(weight_combined$time,0),weight_combined$rep,weight_combined$TYPE),FUN=mean)
+colnames(weight_combined)<-c("time","rep","TYPE","weight_deviation")
+
+env_combined<-aggregate(env_combined$nInfectFeces,by=list(round(env_combined$time,0),env_combined$rep,env_combined$TYPE),FUN=mean)
+colnames(env_combined)<-c("time","rep","TYPE","nInfectFeces")
+
+
+
+DATA_weight_inf_load<-left_join(weight_combined,env_combined)
+
+
+
+ggplot(data = DATA_weight_inf_load,
+       aes(x = nInfectFeces, y = weight_deviation)) +
+    geom_path(data = subset(DATA_weight_inf_load, TYPE == "INDIVIDUAL"), 
+             aes(group = rep, x = nInfectFeces, y = weight_deviation), size=1,
+             color = "darkgreen", alpha = 0.3) +  
+    geom_path(data = subset(DATA_weight_inf_load, TYPE == "MEAN"), 
+             aes(group = rep, x = nInfectFeces, y = weight_deviation), size=1,
+             color = "red3", alpha = 0.7) +  
+    geom_point(data = subset(DATA_weight_inf_load, TYPE == "INDIVIDUAL"), 
+              aes(group = rep), color = "darkgreen", size = 0.5, alpha = 0.5) +
+    geom_point(data = subset(DATA_weight_inf_load, TYPE == "MEAN"),
+              color = "red3", size = 1) +
+    xlab("Infectious load") +
+    ylab("Weight deviation (%)") +
+    ggtitle("") +
+    theme_bw() +
+    theme(legend.position = "bottom", 
+          legend.direction = "horizontal")+
+    scale_x_continuous(expand = c(0, 0)) +
+    scale_y_continuous(expand = c(0, 0))
+
+
+
+```
+
+
+
+## one curve per individual 
+```{r}
+repet <- 4
+xlimit<-60
+ncolonne<-6
+ID<-1:4
+
+# Weight loss
+ggplot(data = PERFs[PERFs$rep == repet, ],
+       aes(x = Day, y = weight_deviation, group = ID, col = as.factor(status))) +
+    geom_line(size=0.8) +
+    xlab("Time") +
+    ylab("weight %") +
+    ggtitle("Weight loss") +
+    xlim(c(0, xlimit)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    facet_wrap( ~ ID,ncol=ncolonne)+
+    scale_color_manual(values = c("dodgerblue","orange", "red2","black"))
+
+# Weight 
+ggplot(data = PERFs[PERFs$rep == repet, ],
+       aes(x = Day, y = weight, group = ID, col = as.factor(status))) +
+    geom_line(size=0.8) +
+    xlab("Time") +
+    ylab("weight g") +
+    ggtitle("Weight") +
+    xlim(c(0, xlimit)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    facet_wrap( ~ ID,ncol=ncolonne)+
+    scale_color_manual(values = c("dodgerblue","orange", "red2","black"))
+
+```
+
+
+
